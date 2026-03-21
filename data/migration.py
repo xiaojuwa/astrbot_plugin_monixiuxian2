@@ -520,6 +520,20 @@ async def _create_all_tables_v2(conn: aiosqlite.Connection):
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_bank_trans_user ON bank_transactions(user_id)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_bank_trans_time ON bank_transactions(created_at)")
 
+    # 创建灵眼信息表
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS spirit_eyes (
+            eye_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            eye_type INTEGER NOT NULL DEFAULT 1,
+            eye_name TEXT NOT NULL DEFAULT '下品灵眼',
+            exp_per_hour INTEGER NOT NULL DEFAULT 500,
+            spawn_time INTEGER NOT NULL,
+            owner_id TEXT,
+            owner_name TEXT,
+            claim_time INTEGER
+        )
+    """)
+
     logger.info("数据库表已创建完成（v2 - 完整修仙系统）")
 
 
@@ -951,6 +965,39 @@ async def _migrate_to_v20(conn: aiosqlite.Connection, config_manager: ConfigMana
     """迁移到v20 - 用户CD表添加额外数据字段"""
     logger.info("开始迁移到v20：用户CD表添加额外数据字段")
     
+    # 确保 spirit_eyes 表存在（防止 v16 迁移跳过导致的结构缺失）
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS spirit_eyes (
+            eye_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            eye_type INTEGER NOT NULL DEFAULT 1,
+            eye_name TEXT NOT NULL DEFAULT '下品灵眼',
+            exp_per_hour INTEGER NOT NULL DEFAULT 500,
+            spawn_time INTEGER NOT NULL,
+            owner_id TEXT,
+            owner_name TEXT,
+            claim_time INTEGER
+        )
+    """)
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_spirit_eyes_owner ON spirit_eyes(owner_id)")
+
+    # 检查并补全初始灵眼数据（如果表为空，则插入初始化数据）
+    async with conn.execute("SELECT COUNT(*) FROM spirit_eyes") as cursor:
+        row = await cursor.fetchone()
+        if row and row[0] == 0:
+            import time
+            now = int(time.time())
+            initial_eyes = [
+                (1, "下品灵眼", 500, now),
+                (1, "下品灵眼", 500, now),
+                (2, "中品灵眼", 2000, now),
+            ]
+            for eye in initial_eyes:
+                await conn.execute(
+                    "INSERT INTO spirit_eyes (eye_type, eye_name, exp_per_hour, spawn_time) VALUES (?, ?, ?, ?)",
+                    eye
+                )
+            logger.info("已成功补全初始灵眼数据")
+            
     # 添加extra_data字段用于存储额外信息（如秘境ID、战斗冷却等）
     try:
         await conn.execute("ALTER TABLE user_cd ADD COLUMN extra_data TEXT NOT NULL DEFAULT '{}'")
