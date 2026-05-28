@@ -314,10 +314,6 @@ class PlayerHandler:
         effective_minutes = min(duration_minutes, MAX_CULTIVATION_MINUTES)
         exceeded_time = duration_minutes > MAX_CULTIVATION_MINUTES
 
-        # 更新丹药效果，确保持续结算
-        await self.pill_manager.update_temporary_effects(player)
-        pill_multipliers = self.pill_manager.calculate_pill_attribute_effects(player)
-
         # 获取主修心法的修为加成
         technique_bonus = 0.0
         if player.main_technique:
@@ -334,13 +330,82 @@ class PlayerHandler:
                     technique_bonus = item.exp_multiplier
                     break
 
-        # 计算获得的修为（使用有效时长）
-        gained_exp = self.cultivation_manager.calculate_cultivation_exp(
-            player,
-            effective_minutes,
-            technique_bonus,
-            pill_multipliers
-        )
+        # 分段计算修为收益（考虑丹药有效期）
+        # 在更新丹药效果前先获取当前活跃效果
+        original_effects = player.get_active_pill_effects()
+        cultivation_start = player.cultivation_start_time
+        
+        # 收集所有时间节点：闭关开始、丹药过期时间、闭关结束
+        time_points = {cultivation_start, end_time}
+        for effect in original_effects:
+            expiry_time = effect.get("expiry_time", 0)
+            if expiry_time > 0:
+                time_points.add(expiry_time)
+        
+        # 过滤出在闭关时间段内的时间点
+        valid_points = [t for t in time_points if cultivation_start <= t <= end_time]
+        valid_points.sort()
+        
+        total_exp = 0
+        
+        # 分段计算每段时间的修为收益
+        for i in range(len(valid_points) - 1):
+            segment_start = valid_points[i]
+            segment_end = valid_points[i + 1]
+            segment_seconds = segment_end - segment_start
+            # 使用浮点数精确计算分钟数，避免边界丢失
+            segment_minutes = segment_seconds / 60.0
+            
+            if segment_minutes < 1/60:  # 小于1秒不计算
+                continue
+            
+            # 计算该时间段内有效的丹药效果
+            current_time_for_segment = segment_start + segment_seconds // 2  # 取时间段中点
+            active_effects_for_segment = []
+            for effect in original_effects:
+                expiry_time = effect.get("expiry_time", 0)
+                if expiry_time <= 0 or current_time_for_segment < expiry_time:
+                    active_effects_for_segment.append(effect)
+            
+            # 计算该时间段的丹药倍率
+            segment_multipliers = {
+                "physical_damage": 1.0,
+                "magic_damage": 1.0,
+                "physical_defense": 1.0,
+                "magic_defense": 1.0,
+                "cultivation_speed": 1.0,
+            }
+            
+            for effect in active_effects_for_segment:
+                if "physical_damage_multiplier" in effect:
+                    segment_multipliers["physical_damage"] += effect["physical_damage_multiplier"]
+                if "magic_damage_multiplier" in effect:
+                    segment_multipliers["magic_damage"] += effect["magic_damage_multiplier"]
+                if "physical_defense_multiplier" in effect:
+                    segment_multipliers["physical_defense"] += effect["physical_defense_multiplier"]
+                if "magic_defense_multiplier" in effect:
+                    segment_multipliers["magic_defense"] += effect["magic_defense_multiplier"]
+                if "cultivation_multiplier" in effect:
+                    segment_multipliers["cultivation_speed"] += effect["cultivation_multiplier"]
+            
+            # 确保倍率不为负
+            for key in segment_multipliers:
+                segment_multipliers[key] = max(0.0, segment_multipliers[key])
+            
+            # 计算该段时间的修为
+            segment_exp = self.cultivation_manager.calculate_cultivation_exp(
+                player,
+                segment_minutes,
+                technique_bonus,
+                segment_multipliers
+            )
+            total_exp += segment_exp
+
+        # 更新丹药效果（处理过期效果和周期性效果）
+        await self.pill_manager.update_temporary_effects(player)
+        
+        # 计算获得的修为
+        gained_exp = total_exp
 
         # 更新玩家数据
         player.experience += gained_exp
